@@ -4,9 +4,13 @@ Stock Gap & Price Action Analysis Tool
 Fetches historical market data, detects opening gaps above a threshold,
 and exports a formatted Excel report with subsequent price action analysis.
 
+By default only gap-ups (Open > previous Close) are detected. Use
+--direction to also include gap-downs or both.
+
 Usage:
     python gappers.py --ticker TSLA --start 2026-01-01 --end 2026-05-15
     python gappers.py --ticker AAPL --threshold 0.02
+    python gappers.py --ticker AAPL --direction both
 """
 
 import argparse
@@ -35,6 +39,10 @@ def parse_args() -> argparse.Namespace:
         "--threshold", type=float, default=0.015,
         help="Minimum opening gap to include, as a decimal (0.015 = 1.5%%)"
     )
+    parser.add_argument(
+        "--direction", choices=["up", "down", "both"], default="up",
+        help="Which gap direction to detect: 'up' (default), 'down', or 'both'"
+    )
     parser.add_argument("--output", default=None, help="Output .xlsx filename")
     return parser.parse_args()
 
@@ -57,15 +65,25 @@ def fetch_data(ticker: str, start: str, end: str) -> pd.DataFrame:
     return data
 
 
-def calculate_gaps(data: pd.DataFrame, threshold: float) -> pd.DataFrame:
+def calculate_gaps(data: pd.DataFrame, threshold: float, direction: str = "up") -> pd.DataFrame:
     data = data.copy()
     data["Prev_Close"] = data["Close"].shift(1)
     data["Gap_Pct"] = (data["Open"] - data["Prev_Close"]) / data["Prev_Close"]
     data["Day2_Move_Pct"] = (data["Close"].shift(-1) - data["Close"]) / data["Close"]
     data["Day3_Move_Pct"] = (data["Close"].shift(-2) - data["Close"]) / data["Close"]
 
-    gappers = data[data["Gap_Pct"] > threshold].dropna(subset=["Prev_Close"])
-    logger.info("Found %d gap events above %.2f%% threshold.", len(gappers), threshold * 100)
+    if direction == "up":
+        mask = data["Gap_Pct"] > threshold
+    elif direction == "down":
+        mask = data["Gap_Pct"] < -threshold
+    else:  # both
+        mask = data["Gap_Pct"].abs() > threshold
+
+    gappers = data[mask].dropna(subset=["Prev_Close"])
+    logger.info(
+        "Found %d gap events (direction=%s) above %.2f%% threshold.",
+        len(gappers), direction, threshold * 100
+    )
     return gappers
 
 
@@ -163,7 +181,7 @@ def build_report(gappers: pd.DataFrame, ticker: str) -> openpyxl.Workbook:
 def main() -> None:
     args = parse_args()
     data = fetch_data(args.ticker, args.start, args.end)
-    gappers = calculate_gaps(data, args.threshold)
+    gappers = calculate_gaps(data, args.threshold, args.direction)
 
     if gappers.empty:
         logger.warning("No gap events found for the given parameters. No report generated.")

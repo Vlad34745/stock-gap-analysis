@@ -1,2 +1,5 @@
 venv/
 *.xlsx
+__pycache__/
+*.pyc
+.DS_Store
