@@ -44,7 +44,21 @@ def parse_args() -> argparse.Namespace:
         help="Which gap direction to detect: 'up' (default), 'down', or 'both'"
     )
     parser.add_argument("--output", default=None, help="Output .xlsx filename")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.threshold <= 0:
+        parser.error("--threshold must be a positive number (e.g. 0.015 for 1.5%)")
+
+    try:
+        start_date = pd.to_datetime(args.start)
+        end_date = pd.to_datetime(args.end)
+    except ValueError as exc:
+        parser.error(f"Invalid date format, expected YYYY-MM-DD: {exc}")
+    else:
+        if start_date >= end_date:
+            parser.error(f"--start ({args.start}) must be before --end ({args.end})")
+
+    return args
 
 
 def fetch_data(ticker: str, start: str, end: str) -> pd.DataFrame:
@@ -133,27 +147,38 @@ def build_report(gappers: pd.DataFrame, ticker: str) -> openpyxl.Workbook:
 
         c_gap = ws.cell(row=current_row, column=4, value=float(row["Gap_Pct"]))
         c_gap.number_format = "0.00%"
-        c_gap.font = font_bold
+        if row["Gap_Pct"] > 0:
+            c_gap.font = Font(name="Segoe UI", size=11, bold=True, color="1B5E20")
+            c_gap.fill = fill_green
+        else:
+            c_gap.font = Font(name="Segoe UI", size=11, bold=True, color="B71C1C")
+            c_gap.fill = fill_red
 
         ws.cell(row=current_row, column=5, value=float(row["Close"])).number_format = "$#,##0.00"
 
         for col_idx, col_name in [(6, "Day2_Move_Pct"), (7, "Day3_Move_Pct")]:
-            val = float(row[col_name])
-            c_move = ws.cell(row=current_row, column=col_idx, value=val)
-            c_move.number_format = "0.00%"
-            if val > 0:
-                c_move.fill = fill_green
-                c_move.font = Font(name="Segoe UI", size=11, color="1B5E20", bold=True)
+            raw_val = row[col_name]
+            c_move = ws.cell(row=current_row, column=col_idx)
+            if pd.isna(raw_val):
+                c_move.value = "N/A"
+                c_move.font = Font(name="Segoe UI", size=11, color="9E9E9E", italic=True)
             else:
-                c_move.fill = fill_red
-                c_move.font = Font(name="Segoe UI", size=11, color="B71C1C")
+                val = float(raw_val)
+                c_move.value = val
+                c_move.number_format = "0.00%"
+                if val > 0:
+                    c_move.fill = fill_green
+                    c_move.font = Font(name="Segoe UI", size=11, color="1B5E20", bold=True)
+                else:
+                    c_move.fill = fill_red
+                    c_move.font = Font(name="Segoe UI", size=11, color="B71C1C")
 
         for col in range(1, 8):
             cell = ws.cell(row=current_row, column=col)
             cell.border = thin_border
             if col != 1:
                 cell.alignment = Alignment(horizontal="right", vertical="center")
-            if col not in (6, 7) and is_zebra:
+            if col not in (4, 6, 7) and is_zebra:
                 cell.fill = row_fill
 
         ws.row_dimensions[current_row].height = 20
