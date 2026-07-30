@@ -7,15 +7,19 @@ and exports a formatted Excel report with subsequent price action analysis.
 By default only gap-ups (Open > previous Close) are detected. Use
 --direction to also include gap-downs or both.
 
+Multiple tickers can be analyzed in one run (comma-separated); each
+gets its own sheet in a single output workbook.
+
 Usage:
     python gappers.py --ticker TSLA --start 2026-01-01 --end 2026-05-15
     python gappers.py --ticker AAPL --threshold 0.02
     python gappers.py --ticker AAPL --direction both
+    python gappers.py --ticker AAPL,TSLA,NVDA --output multi_report.xlsx
 """
 
 import argparse
 import logging
-import sys
+from typing import Optional
 
 import yfinance as yf
 import pandas as pd
@@ -32,7 +36,10 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Stock gap and price action analyzer.")
-    parser.add_argument("--ticker", default="AAPL", help="Ticker symbol, e.g. TSLA, NVDA, BTC-USD")
+    parser.add_argument(
+        "--ticker", default="AAPL",
+        help="Ticker symbol, e.g. TSLA, NVDA, BTC-USD. Comma-separated for multiple, e.g. AAPL,TSLA,NVDA"
+    )
     parser.add_argument("--start", default="2026-01-01", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", default="2026-05-15", help="End date (YYYY-MM-DD)")
     parser.add_argument(
@@ -61,20 +68,20 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def fetch_data(ticker: str, start: str, end: str) -> pd.DataFrame:
+def fetch_data(ticker: str, start: str, end: str) -> Optional[pd.DataFrame]:
     logger.info("Fetching historical data for %s from Yahoo Finance...", ticker)
     try:
         data = yf.download(ticker, start=start, end=end, auto_adjust=False, actions=False)
     except Exception as exc:
         logger.error("Failed to fetch data for '%s': %s", ticker, exc)
-        sys.exit(1)
+        return None
 
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.droplevel(1)
 
     if data.empty:
         logger.error("No data returned for ticker '%s'. Check the symbol or date range.", ticker)
-        sys.exit(1)
+        return None
 
     return data
 
@@ -101,10 +108,23 @@ def calculate_gaps(data: pd.DataFrame, threshold: float, direction: str = "up") 
     return gappers
 
 
-def build_report(gappers: pd.DataFrame, ticker: str) -> openpyxl.Workbook:
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Gap Analysis Summary"
+def build_report(gappers: pd.DataFrame, ticker: str, wb: openpyxl.Workbook = None) -> openpyxl.Workbook:
+    """
+    Build (or append to) a formatted gap-analysis report.
+
+    If `wb` is None, a new workbook is created and the sheet replaces the
+    default blank sheet. If `wb` is given, a new sheet is appended to it —
+    this is how multiple tickers end up in one file, one sheet each.
+    """
+    if wb is None:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+    else:
+        ws = wb.create_sheet()
+
+    # Excel sheet names: max 31 chars, no \ / ? * [ ] :
+    safe_title = "".join(c for c in ticker if c not in r'\/?*[]:')[:31]
+    ws.title = safe_title or "Sheet"
     ws.views.sheetView[0].showGridLines = True
 
     font_title = Font(name="Segoe UI", size=16, bold=True, color="004D40")
@@ -205,17 +225,36 @@ def build_report(gappers: pd.DataFrame, ticker: str) -> openpyxl.Workbook:
 
 def main() -> None:
     args = parse_args()
-    data = fetch_data(args.ticker, args.start, args.end)
-    gappers = calculate_gaps(data, args.threshold, args.direction)
+    tickers = [t.strip().upper() for t in args.ticker.split(",") if t.strip()]
 
-    if gappers.empty:
-        logger.warning("No gap events found for the given parameters. No report generated.")
+    wb = None
+    tickers_with_data = []
+    for ticker in tickers:
+        data = fetch_data(ticker, args.start, args.end)
+        if data is None:
+            continue
+        gappers = calculate_gaps(data, args.threshold, args.direction)
+
+        if gappers.empty:
+            logger.warning("No gap events found for '%s'. Skipping.", ticker)
+            continue
+
+        wb = build_report(gappers, ticker, wb)
+        tickers_with_data.append(ticker)
+
+    if wb is None:
+        logger.warning("No gap events found for any ticker. No report generated.")
         return
 
-    wb = build_report(gappers, args.ticker)
-    output_filename = args.output or f"{args.ticker}_Gap_Analysis_Project.xlsx"
+    if args.output:
+        output_filename = args.output
+    elif len(tickers_with_data) == 1:
+        output_filename = f"{tickers_with_data[0]}_Gap_Analysis_Project.xlsx"
+    else:
+        output_filename = "Multi_Ticker_Gap_Analysis_Project.xlsx"
+
     wb.save(output_filename)
-    logger.info("Success! Report saved as: %s", output_filename)
+    logger.info("Success! Report saved as: %s (%d ticker sheet(s))", output_filename, len(tickers_with_data))
 
 
 if __name__ == "__main__":

@@ -92,3 +92,21 @@ def test_build_report_empty_input_does_not_crash():
                                    "Gap_Pct", "Day2_Move_Pct", "Day3_Move_Pct"])
     wb = build_report(empty, ticker="EMPTY")
     assert wb.active["A1"].value == "Historical Stock Gap Analysis: EMPTY"
+
+
+def test_build_report_multi_ticker_creates_separate_sheets(sample_data):
+    """Passing an existing workbook should append a new sheet, not overwrite."""
+    gappers = calculate_gaps(sample_data, threshold=0.02, direction="both")
+
+    wb = build_report(gappers, ticker="AAPL")
+    wb = build_report(gappers, ticker="TSLA", wb=wb)
+
+    assert wb.sheetnames == ["AAPL", "TSLA"]
+    assert wb["AAPL"]["A1"].value == "Historical Stock Gap Analysis: AAPL"
+    assert wb["TSLA"]["A1"].value == "Historical Stock Gap Analysis: TSLA"
+
+
+def test_build_report_sanitizes_unsafe_sheet_name(sample_data):
+    gappers = calculate_gaps(sample_data, threshold=0.02, direction="both")
+    wb = build_report(gappers, ticker="BRK/B")  # '/' is illegal in sheet names
+    assert wb.active.title == "BRKB"
