@@ -18,7 +18,10 @@ Usage:
 """
 
 import argparse
+import hashlib
 import logging
+import time
+from pathlib import Path
 from typing import Optional
 
 import yfinance as yf
@@ -32,6 +35,11 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+CACHE_DIR = Path(".cache")
+CACHE_MAX_AGE_SECONDS = 24 * 60 * 60  # 1 day
+MAX_FETCH_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 2
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,6 +59,10 @@ def parse_args() -> argparse.Namespace:
         help="Which gap direction to detect: 'up' (default), 'down', or 'both'"
     )
     parser.add_argument("--output", default=None, help="Output .xlsx filename")
+    parser.add_argument(
+        "--no-cache", action="store_true",
+        help="Skip local cache and always re-fetch fresh data from Yahoo Finance"
+    )
     args = parser.parse_args()
 
     if args.threshold <= 0:
@@ -68,20 +80,67 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def fetch_data(ticker: str, start: str, end: str) -> Optional[pd.DataFrame]:
-    logger.info("Fetching historical data for %s from Yahoo Finance...", ticker)
+def _cache_path(ticker: str, start: str, end: str) -> Path:
+    key = hashlib.md5(f"{ticker}_{start}_{end}".encode()).hexdigest()[:12]
+    return CACHE_DIR / f"{ticker}_{key}.csv"
+
+
+def _load_from_cache(path: Path) -> Optional[pd.DataFrame]:
+    if not path.exists():
+        return None
+    age = time.time() - path.stat().st_mtime
+    if age > CACHE_MAX_AGE_SECONDS:
+        return None
     try:
-        data = yf.download(ticker, start=start, end=end, auto_adjust=False, actions=False)
-    except Exception as exc:
-        logger.error("Failed to fetch data for '%s': %s", ticker, exc)
+        data = pd.read_csv(path, index_col=0, parse_dates=True)
+    except Exception:
+        return None
+    return data if not data.empty else None
+
+
+def fetch_data(ticker: str, start: str, end: str, use_cache: bool = True) -> Optional[pd.DataFrame]:
+    cache_path = _cache_path(ticker, start, end)
+
+    if use_cache:
+        cached = _load_from_cache(cache_path)
+        if cached is not None:
+            logger.info("Using cached data for %s (from %s).", ticker, cache_path.name)
+            return cached
+
+    data = None
+    for attempt in range(1, MAX_FETCH_RETRIES + 1):
+        logger.info(
+            "Fetching historical data for %s from Yahoo Finance (attempt %d/%d)...",
+            ticker, attempt, MAX_FETCH_RETRIES
+        )
+        try:
+            data = yf.download(ticker, start=start, end=end, auto_adjust=False, actions=False)
+        except Exception as exc:
+            logger.warning("Attempt %d failed for '%s': %s", attempt, ticker, exc)
+            data = None
+
+        if data is not None and isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.droplevel(1)
+
+        if data is not None and not data.empty:
+            break
+
+        if attempt < MAX_FETCH_RETRIES:
+            wait = RETRY_BACKOFF_SECONDS * attempt
+            logger.info("Retrying in %ds...", wait)
+            time.sleep(wait)
+
+    if data is None or data.empty:
+        logger.error("No data returned for ticker '%s' after %d attempts. Check the symbol or date range.",
+                     ticker, MAX_FETCH_RETRIES)
         return None
 
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.droplevel(1)
-
-    if data.empty:
-        logger.error("No data returned for ticker '%s'. Check the symbol or date range.", ticker)
-        return None
+    if use_cache:
+        try:
+            CACHE_DIR.mkdir(exist_ok=True)
+            data.to_csv(cache_path)
+        except Exception as exc:
+            logger.warning("Could not write cache for '%s': %s", ticker, exc)
 
     return data
 
@@ -223,14 +282,62 @@ def build_report(gappers: pd.DataFrame, ticker: str, wb: openpyxl.Workbook = Non
     return wb
 
 
+def build_summary_sheet(wb: openpyxl.Workbook, stats: list) -> None:
+    """
+    Insert a 'Summary' sheet as the first sheet, comparing all analyzed
+    tickers side by side: gap count, average Gap %, average Day2/Day3 Move.
+    `stats` is a list of dicts, one per ticker.
+    """
+    ws = wb.create_sheet("Summary", 0)
+    ws.views.sheetView[0].showGridLines = True
+
+    font_title = Font(name="Segoe UI", size=16, bold=True, color="004D40")
+    font_header = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
+    fill_header = PatternFill(start_color="004D40", end_color="004D40", fill_type="solid")
+    thin_border = Border(
+        left=Side(style="thin", color="CCCCCC"), right=Side(style="thin", color="CCCCCC"),
+        top=Side(style="thin", color="CCCCCC"), bottom=Side(style="thin", color="CCCCCC"),
+    )
+
+    ws["A1"] = "Gap Analysis — Ticker Comparison"
+    ws["A1"].font = font_title
+    ws.merge_cells("A1:E1")
+    ws.row_dimensions[1].height = 30
+
+    headers = ["Ticker", "Gap Events", "Avg Gap %", "Avg Day 2 Move", "Avg Day 3 Move"]
+    for idx, h in enumerate(headers, start=1):
+        cell = ws.cell(row=3, column=idx, value=h)
+        cell.font = font_header
+        cell.fill = fill_header
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = thin_border
+
+    for i, s in enumerate(stats, start=4):
+        ws.cell(row=i, column=1, value=s["ticker"]).font = Font(name="Segoe UI", bold=True)
+        ws.cell(row=i, column=2, value=s["count"])
+        for col, key in [(3, "avg_gap"), (4, "avg_day2"), (5, "avg_day3")]:
+            c = ws.cell(row=i, column=col, value=s[key])
+            c.number_format = "0.00%"
+        for col in range(1, 6):
+            ws.cell(row=i, column=col).border = thin_border
+            if col != 1:
+                ws.cell(row=i, column=col).alignment = Alignment(horizontal="right")
+
+    for col in ws.columns:
+        max_len = max(len(str(cell.value or "")) for cell in col)
+        col_letter = get_column_letter(col[0].column)
+        ws.column_dimensions[col_letter].width = max(max_len + 3, 15)
+
+
 def main() -> None:
     args = parse_args()
     tickers = [t.strip().upper() for t in args.ticker.split(",") if t.strip()]
 
     wb = None
     tickers_with_data = []
+    stats = []
     for ticker in tickers:
-        data = fetch_data(ticker, args.start, args.end)
+        data = fetch_data(ticker, args.start, args.end, use_cache=not args.no_cache)
         if data is None:
             continue
         gappers = calculate_gaps(data, args.threshold, args.direction)
@@ -241,10 +348,20 @@ def main() -> None:
 
         wb = build_report(gappers, ticker, wb)
         tickers_with_data.append(ticker)
+        stats.append({
+            "ticker": ticker,
+            "count": len(gappers),
+            "avg_gap": float(gappers["Gap_Pct"].mean()),
+            "avg_day2": float(gappers["Day2_Move_Pct"].dropna().mean()) if gappers["Day2_Move_Pct"].notna().any() else 0.0,
+            "avg_day3": float(gappers["Day3_Move_Pct"].dropna().mean()) if gappers["Day3_Move_Pct"].notna().any() else 0.0,
+        })
 
     if wb is None:
         logger.warning("No gap events found for any ticker. No report generated.")
         return
+
+    if len(tickers_with_data) > 1:
+        build_summary_sheet(wb, stats)
 
     if args.output:
         output_filename = args.output

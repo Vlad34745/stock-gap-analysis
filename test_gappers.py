@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from gappers import calculate_gaps, build_report
+from gappers import calculate_gaps, build_report, build_summary_sheet, _cache_path, _load_from_cache
 
 
 @pytest.fixture
@@ -110,3 +110,39 @@ def test_build_report_sanitizes_unsafe_sheet_name(sample_data):
     gappers = calculate_gaps(sample_data, threshold=0.02, direction="both")
     wb = build_report(gappers, ticker="BRK/B")  # '/' is illegal in sheet names
     assert wb.active.title == "BRKB"
+
+
+def test_build_summary_sheet_is_first_and_has_correct_values(sample_data):
+    gappers = calculate_gaps(sample_data, threshold=0.02, direction="both")
+    wb = build_report(gappers, ticker="AAPL")
+    wb = build_report(gappers, ticker="TSLA", wb=wb)
+
+    stats = [
+        {"ticker": "AAPL", "count": 2, "avg_gap": 0.01, "avg_day2": 0.02, "avg_day3": 0.03},
+        {"ticker": "TSLA", "count": 1, "avg_gap": -0.01, "avg_day2": 0.0, "avg_day3": 0.0},
+    ]
+    build_summary_sheet(wb, stats)
+
+    assert wb.sheetnames[0] == "Summary"
+    ws = wb["Summary"]
+    assert ws.cell(row=4, column=1).value == "AAPL"
+    assert ws.cell(row=4, column=2).value == 2
+    assert ws.cell(row=5, column=1).value == "TSLA"
+
+
+def test_cache_roundtrip(tmp_path, monkeypatch, sample_data):
+    import gappers as gappers_module
+    monkeypatch.setattr(gappers_module, "CACHE_DIR", tmp_path)
+
+    path = _cache_path("AAPL", "2026-01-01", "2026-01-10")
+    sample_data.to_csv(path)
+
+    cached = _load_from_cache(path)
+    assert cached is not None
+    assert list(cached.columns) == list(sample_data.columns)
+    assert len(cached) == len(sample_data)
+
+
+def test_cache_ignored_when_missing():
+    path = _cache_path("NON_EXISTENT_TICKER_XYZ", "2026-01-01", "2026-01-10")
+    assert _load_from_cache(path) is None
