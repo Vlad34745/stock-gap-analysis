@@ -78,8 +78,8 @@ def test_build_report_handles_trailing_nan_rows(sample_data):
     wb = build_report(gappers, ticker="TEST")
     ws = wb.active
 
-    # Collect all cell values in the Day2/Day3 columns (F, G) below the header
-    for row in ws.iter_rows(min_row=5, max_col=7, min_col=6):
+    # Collect all cell values in the Day2/Day3 columns (G, H) below the header
+    for row in ws.iter_rows(min_row=5, max_col=8, min_col=7):
         for cell in row:
             if cell.value is not None and not isinstance(cell.value, str):
                 assert not (isinstance(cell.value, float) and np.isnan(cell.value)), (
@@ -87,9 +87,30 @@ def test_build_report_handles_trailing_nan_rows(sample_data):
                 )
 
 
+def test_calculate_gaps_detects_fill(sample_data):
+    """
+    Day 3 gap-up: Open=105, Prev_Close=100, Low=104 -> never traded back
+    down to 100, so this gap should NOT be marked as filled.
+    """
+    result = calculate_gaps(sample_data, threshold=0.02, direction="up")
+    assert bool(result.iloc[0]["Gap_Filled"]) is False
+
+
+def test_calculate_gaps_detects_fill_when_price_returns():
+    """A gap-up where price dips back to (or below) Prev_Close counts as filled."""
+    dates = pd.date_range("2026-01-01", periods=2, freq="D")
+    data = pd.DataFrame(
+        {"Open": [100, 110], "Close": [100, 105], "High": [101, 112], "Low": [99, 99]},
+        index=dates,
+    )
+    result = calculate_gaps(data, threshold=0.02, direction="up")
+    assert len(result) == 1
+    assert bool(result.iloc[0]["Gap_Filled"]) is True
+
+
 def test_build_report_empty_input_does_not_crash():
     empty = pd.DataFrame(columns=["Open", "Close", "High", "Low", "Prev_Close",
-                                   "Gap_Pct", "Day2_Move_Pct", "Day3_Move_Pct"])
+                                   "Gap_Pct", "Gap_Filled", "Day2_Move_Pct", "Day3_Move_Pct"])
     wb = build_report(empty, ticker="EMPTY")
     assert wb.active["A1"].value == "Historical Stock Gap Analysis: EMPTY"
 
@@ -112,14 +133,39 @@ def test_build_report_sanitizes_unsafe_sheet_name(sample_data):
     assert wb.active.title == "BRKB"
 
 
+def test_build_report_filled_column_matches_gap_filled_flag(sample_data):
+    gappers = calculate_gaps(sample_data, threshold=0.02, direction="both")
+    wb = build_report(gappers, ticker="TEST")
+    ws = wb.active
+
+    for i, (_, row) in enumerate(gappers.iterrows()):
+        cell_value = ws.cell(row=5 + i, column=5).value  # column E = "Filled?"
+        expected = "Yes" if bool(row["Gap_Filled"]) else "No"
+        assert cell_value == expected
+
+
+def test_build_report_adds_chart_when_data_present(sample_data):
+    gappers = calculate_gaps(sample_data, threshold=0.02, direction="both")
+    wb = build_report(gappers, ticker="TEST")
+    ws = wb.active
+    assert len(ws._charts) == 1
+
+
+def test_build_report_no_chart_when_empty():
+    empty = pd.DataFrame(columns=["Open", "Close", "High", "Low", "Prev_Close",
+                                   "Gap_Pct", "Gap_Filled", "Day2_Move_Pct", "Day3_Move_Pct"])
+    wb = build_report(empty, ticker="EMPTY")
+    assert len(wb.active._charts) == 0
+
+
 def test_build_summary_sheet_is_first_and_has_correct_values(sample_data):
     gappers = calculate_gaps(sample_data, threshold=0.02, direction="both")
     wb = build_report(gappers, ticker="AAPL")
     wb = build_report(gappers, ticker="TSLA", wb=wb)
 
     stats = [
-        {"ticker": "AAPL", "count": 2, "avg_gap": 0.01, "avg_day2": 0.02, "avg_day3": 0.03},
-        {"ticker": "TSLA", "count": 1, "avg_gap": -0.01, "avg_day2": 0.0, "avg_day3": 0.0},
+        {"ticker": "AAPL", "count": 2, "avg_gap": 0.01, "fill_rate": 0.5, "avg_day2": 0.02, "avg_day3": 0.03},
+        {"ticker": "TSLA", "count": 1, "avg_gap": -0.01, "fill_rate": 1.0, "avg_day2": 0.0, "avg_day3": 0.0},
     ]
     build_summary_sheet(wb, stats)
 

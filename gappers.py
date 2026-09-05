@@ -2,19 +2,22 @@
 Stock Gap & Price Action Analysis Tool
 ----------------------------------------
 Fetches historical market data, detects opening gaps above a threshold,
-and exports a formatted Excel report with subsequent price action analysis.
+and exports a formatted Excel report with subsequent price action analysis,
+gap-fill detection, and an embedded chart.
 
 By default only gap-ups (Open > previous Close) are detected. Use
 --direction to also include gap-downs or both.
 
 Multiple tickers can be analyzed in one run (comma-separated); each
-gets its own sheet in a single output workbook.
+gets its own sheet in a single output workbook, plus a Summary
+comparison sheet.
 
 Usage:
     python gappers.py --ticker TSLA --start 2026-01-01 --end 2026-05-15
     python gappers.py --ticker AAPL --threshold 0.02
     python gappers.py --ticker AAPL --direction both
     python gappers.py --ticker AAPL,TSLA,NVDA --output multi_report.xlsx
+    python gappers.py --ticker AAPL --csv
 """
 
 import argparse
@@ -25,10 +28,12 @@ from pathlib import Path
 from typing import Optional
 
 import yfinance as yf
+import numpy as np
 import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.chart import BarChart, Reference
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,6 +67,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-cache", action="store_true",
         help="Skip local cache and always re-fetch fresh data from Yahoo Finance"
+    )
+    parser.add_argument(
+        "--csv", action="store_true",
+        help="Also save the raw gap events (all tickers combined) to a .csv file next to the .xlsx report"
     )
     args = parser.parse_args()
 
@@ -152,6 +161,13 @@ def calculate_gaps(data: pd.DataFrame, threshold: float, direction: str = "up") 
     data["Day2_Move_Pct"] = (data["Close"].shift(-1) - data["Close"]) / data["Close"]
     data["Day3_Move_Pct"] = (data["Close"].shift(-2) - data["Close"]) / data["Close"]
 
+    # A gap "fills" when price trades back to the previous close on the same day:
+    # for a gap-up, that means the day's Low dipped back down to Prev_Close;
+    # for a gap-down, it means the day's High climbed back up to Prev_Close.
+    gap_up_filled = data["Low"] <= data["Prev_Close"]
+    gap_down_filled = data["High"] >= data["Prev_Close"]
+    data["Gap_Filled"] = np.where(data["Gap_Pct"] > 0, gap_up_filled, gap_down_filled)
+
     if direction == "up":
         mask = data["Gap_Pct"] > threshold
     elif direction == "down":
@@ -202,10 +218,10 @@ def build_report(gappers: pd.DataFrame, ticker: str, wb: openpyxl.Workbook = Non
 
     ws["A1"] = f"Historical Stock Gap Analysis: {ticker}"
     ws["A1"].font = font_title
-    ws.merge_cells("A1:G1")
+    ws.merge_cells("A1:H1")
     ws.row_dimensions[1].height = 30
 
-    headers = ["Date", "Open Price", "Prev Close", "Gap %", "Day 1 Close", "Day 2 Move", "Day 3 Move"]
+    headers = ["Date", "Open Price", "Prev Close", "Gap %", "Filled?", "Day 1 Close", "Day 2 Move", "Day 3 Move"]
     for idx, h in enumerate(headers, start=1):
         cell = ws.cell(row=4, column=idx, value=h)
         cell.font = font_header
@@ -233,9 +249,17 @@ def build_report(gappers: pd.DataFrame, ticker: str, wb: openpyxl.Workbook = Non
             c_gap.font = Font(name="Segoe UI", size=11, bold=True, color="B71C1C")
             c_gap.fill = fill_red
 
-        ws.cell(row=current_row, column=5, value=float(row["Close"])).number_format = "$#,##0.00"
+        c_filled = ws.cell(row=current_row, column=5, value="Yes" if bool(row["Gap_Filled"]) else "No")
+        c_filled.alignment = Alignment(horizontal="center", vertical="center")
+        if bool(row["Gap_Filled"]):
+            c_filled.font = Font(name="Segoe UI", size=11, color="1B5E20", bold=True)
+            c_filled.fill = fill_green
+        else:
+            c_filled.font = Font(name="Segoe UI", size=11, color="757575")
 
-        for col_idx, col_name in [(6, "Day2_Move_Pct"), (7, "Day3_Move_Pct")]:
+        ws.cell(row=current_row, column=6, value=float(row["Close"])).number_format = "$#,##0.00"
+
+        for col_idx, col_name in [(7, "Day2_Move_Pct"), (8, "Day3_Move_Pct")]:
             raw_val = row[col_name]
             c_move = ws.cell(row=current_row, column=col_idx)
             if pd.isna(raw_val):
@@ -252,12 +276,12 @@ def build_report(gappers: pd.DataFrame, ticker: str, wb: openpyxl.Workbook = Non
                     c_move.fill = fill_red
                     c_move.font = Font(name="Segoe UI", size=11, color="B71C1C")
 
-        for col in range(1, 8):
+        for col in range(1, 9):
             cell = ws.cell(row=current_row, column=col)
             cell.border = thin_border
             if col != 1:
                 cell.alignment = Alignment(horizontal="right", vertical="center")
-            if col not in (4, 6, 7) and is_zebra:
+            if col not in (4, 5, 7, 8) and is_zebra:
                 cell.fill = row_fill
 
         ws.row_dimensions[current_row].height = 20
@@ -267,17 +291,42 @@ def build_report(gappers: pd.DataFrame, ticker: str, wb: openpyxl.Workbook = Non
     ws.cell(row=summary_row, column=1, value="Average").font = font_bold
     ws.cell(row=summary_row, column=1).alignment = Alignment(horizontal="left", vertical="center")
 
-    for col_idx, letter in [(4, "D"), (6, "F"), (7, "G")]:
+    for col_idx, letter in [(4, "D"), (7, "G"), (8, "H")]:
         c_avg = ws.cell(row=summary_row, column=col_idx, value=f"=AVERAGE({letter}5:{letter}{summary_row - 2})")
         c_avg.font = font_bold
         c_avg.number_format = "0.00%"
         c_avg.alignment = Alignment(horizontal="right", vertical="center")
         c_avg.border = Border(top=Side(style="thin", color="000000"), bottom=Side(style="double", color="000000"))
 
+    fill_rate = float(gappers["Gap_Filled"].mean()) if len(gappers) else 0.0
+    c_fill_rate = ws.cell(row=summary_row, column=5, value=fill_rate)
+    c_fill_rate.font = font_bold
+    c_fill_rate.number_format = "0.0%"
+    c_fill_rate.alignment = Alignment(horizontal="center", vertical="center")
+    c_fill_rate.border = Border(top=Side(style="thin", color="000000"), bottom=Side(style="double", color="000000"))
+
     for col in ws.columns:
         max_len = max(len(str(cell.value or "")) for cell in col)
         col_letter = get_column_letter(col[0].column)
         ws.column_dimensions[col_letter].width = max(max_len + 3, 13)
+
+    if len(gappers) >= 1:
+        chart = BarChart()
+        chart.type = "col"
+        chart.title = f"{ticker} — Gap % by Event"
+        chart.y_axis.title = "Gap %"
+        chart.y_axis.number_format = "0.0%"
+        chart.x_axis.title = "Date"
+        chart.height = 8
+        chart.width = 18
+        chart.style = 10
+
+        data_ref = Reference(ws, min_col=4, min_row=4, max_row=current_row - 1)
+        cats_ref = Reference(ws, min_col=1, min_row=5, max_row=current_row - 1)
+        chart.add_data(data_ref, titles_from_data=True)
+        chart.set_categories(cats_ref)
+        chart.legend = None
+        ws.add_chart(chart, "J4")
 
     return wb
 
@@ -301,10 +350,10 @@ def build_summary_sheet(wb: openpyxl.Workbook, stats: list) -> None:
 
     ws["A1"] = "Gap Analysis — Ticker Comparison"
     ws["A1"].font = font_title
-    ws.merge_cells("A1:E1")
+    ws.merge_cells("A1:F1")
     ws.row_dimensions[1].height = 30
 
-    headers = ["Ticker", "Gap Events", "Avg Gap %", "Avg Day 2 Move", "Avg Day 3 Move"]
+    headers = ["Ticker", "Gap Events", "Avg Gap %", "Fill Rate", "Avg Day 2 Move", "Avg Day 3 Move"]
     for idx, h in enumerate(headers, start=1):
         cell = ws.cell(row=3, column=idx, value=h)
         cell.font = font_header
@@ -315,10 +364,13 @@ def build_summary_sheet(wb: openpyxl.Workbook, stats: list) -> None:
     for i, s in enumerate(stats, start=4):
         ws.cell(row=i, column=1, value=s["ticker"]).font = Font(name="Segoe UI", bold=True)
         ws.cell(row=i, column=2, value=s["count"])
-        for col, key in [(3, "avg_gap"), (4, "avg_day2"), (5, "avg_day3")]:
+        for col, key, fmt in [
+            (3, "avg_gap", "0.00%"), (4, "fill_rate", "0.0%"),
+            (5, "avg_day2", "0.00%"), (6, "avg_day3", "0.00%"),
+        ]:
             c = ws.cell(row=i, column=col, value=s[key])
-            c.number_format = "0.00%"
-        for col in range(1, 6):
+            c.number_format = fmt
+        for col in range(1, 7):
             ws.cell(row=i, column=col).border = thin_border
             if col != 1:
                 ws.cell(row=i, column=col).alignment = Alignment(horizontal="right")
@@ -336,6 +388,7 @@ def main() -> None:
     wb = None
     tickers_with_data = []
     stats = []
+    csv_frames = []
     for ticker in tickers:
         data = fetch_data(ticker, args.start, args.end, use_cache=not args.no_cache)
         if data is None:
@@ -348,13 +401,21 @@ def main() -> None:
 
         wb = build_report(gappers, ticker, wb)
         tickers_with_data.append(ticker)
+
+        fill_rate = float(gappers["Gap_Filled"].mean())
         stats.append({
             "ticker": ticker,
             "count": len(gappers),
             "avg_gap": float(gappers["Gap_Pct"].mean()),
+            "fill_rate": fill_rate,
             "avg_day2": float(gappers["Day2_Move_Pct"].dropna().mean()) if gappers["Day2_Move_Pct"].notna().any() else 0.0,
             "avg_day3": float(gappers["Day3_Move_Pct"].dropna().mean()) if gappers["Day3_Move_Pct"].notna().any() else 0.0,
         })
+
+        if args.csv:
+            labeled = gappers.copy()
+            labeled.insert(0, "Ticker", ticker)
+            csv_frames.append(labeled)
 
     if wb is None:
         logger.warning("No gap events found for any ticker. No report generated.")
@@ -372,6 +433,19 @@ def main() -> None:
 
     wb.save(output_filename)
     logger.info("Success! Report saved as: %s (%d ticker sheet(s))", output_filename, len(tickers_with_data))
+
+    if args.csv and csv_frames:
+        csv_filename = str(Path(output_filename).with_suffix(".csv"))
+        pd.concat(csv_frames).to_csv(csv_filename)
+        logger.info("Raw gap events also saved as: %s", csv_filename)
+
+    print("\n=== Gap Analysis Summary ===")
+    for s in stats:
+        print(
+            f"{s['ticker']:<8} {s['count']:>3} gaps | "
+            f"avg gap {s['avg_gap']:+.2%} | fill rate {s['fill_rate']:.1%} | "
+            f"avg Day2 {s['avg_day2']:+.2%} | avg Day3 {s['avg_day3']:+.2%}"
+        )
 
 
 if __name__ == "__main__":
