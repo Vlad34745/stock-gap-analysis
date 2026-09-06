@@ -1,5 +1,5 @@
 """
-Unit tests for gappers.py
+Unit tests for the gap_analysis package (entry point: gappers.py).
 
 Run with:
     pip install pytest
@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from gappers import calculate_gaps, build_report, build_summary_sheet, _cache_path, _load_from_cache
+from gap_analysis import calculate_gaps, build_report, build_summary_sheet, _cache_path, _load_from_cache
 
 
 @pytest.fixture
@@ -178,8 +178,8 @@ def test_build_summary_sheet_is_first_and_has_correct_values(sample_data):
 
 
 def test_cache_roundtrip(tmp_path, monkeypatch, sample_data):
-    import gappers as gappers_module
-    monkeypatch.setattr(gappers_module, "CACHE_DIR", tmp_path)
+    from gap_analysis import config as config_module
+    monkeypatch.setattr(config_module, "CACHE_DIR", tmp_path)
 
     path = _cache_path("AAPL", "2026-01-01", "2026-01-10")
     sample_data.to_csv(path)
