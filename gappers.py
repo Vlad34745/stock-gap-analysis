@@ -34,6 +34,14 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import BarChart, Reference
+from openpyxl.chart.marker import DataPoint
+from openpyxl.chart.shapes import GraphicalProperties
+from openpyxl.chart.axis import ChartLines
+from openpyxl.chart.text import RichText
+from openpyxl.drawing.line import LineProperties
+from openpyxl.drawing.text import (
+    Paragraph, ParagraphProperties, CharacterProperties, Font as DrawingFont, RichTextProperties
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -183,6 +191,45 @@ def calculate_gaps(data: pd.DataFrame, threshold: float, direction: str = "up") 
     return gappers
 
 
+ACCENT_TEAL = "004D40"
+ACCENT_GREEN = "2E7D32"
+ACCENT_RED = "C62828"
+GRID_GRAY = "E0E0E0"
+
+
+def _styled_title(text: str, size: int = 1400, color: str = ACCENT_TEAL):
+    """Build a RichText chart title in the report's font/color instead of Excel's plain default."""
+    cp = CharacterProperties(sz=size, b=True, solidFill=color, latin=DrawingFont(typeface="Segoe UI"))
+    pp = ParagraphProperties(defRPr=cp)
+    return _title_from_text(text, cp, pp)
+
+
+def _title_from_text(text, cp, pp):
+    from openpyxl.chart.title import Title
+    from openpyxl.chart.text import Text
+    from openpyxl.drawing.text import RegularTextRun
+    run = RegularTextRun(rPr=cp, t=text)
+    para = Paragraph(pPr=pp, r=[run])
+    rich = RichText(bodyPr=RichTextProperties(), p=[para])
+    return Title(tx=Text(rich=rich))
+
+
+def _style_axis_text(axis, size: int = 900, color: str = "424242", rot: int = -2700000):
+    cp = CharacterProperties(sz=size, solidFill=color, latin=DrawingFont(typeface="Segoe UI"))
+    pp = ParagraphProperties(defRPr=cp)
+    axis.txPr = RichText(bodyPr=RichTextProperties(rot=rot, vert="horz"), p=[Paragraph(pPr=pp, r=[])])
+
+
+def _style_axis_title(axis, text: str, size: int = 1000, color: str = ACCENT_TEAL):
+    cp = CharacterProperties(sz=size, b=True, solidFill=color, latin=DrawingFont(typeface="Segoe UI"))
+    pp = ParagraphProperties(defRPr=cp)
+    axis.title = _title_from_text(text, cp, pp)
+
+
+def _light_gridlines():
+    return ChartLines(spPr=GraphicalProperties(ln=LineProperties(solidFill=GRID_GRAY, w=6350)))
+
+
 def build_report(gappers: pd.DataFrame, ticker: str, wb: openpyxl.Workbook = None) -> openpyxl.Workbook:
     """
     Build (or append to) a formatted gap-analysis report: a color-coded
@@ -315,19 +362,44 @@ def build_report(gappers: pd.DataFrame, ticker: str, wb: openpyxl.Workbook = Non
     if len(gappers) >= 1:
         chart = BarChart()
         chart.type = "col"
-        chart.title = f"{ticker} — Gap % by Event"
-        chart.y_axis.title = "Gap %"
-        chart.y_axis.number_format = "0.0%"
-        chart.x_axis.title = "Date"
-        chart.height = 8
-        chart.width = 18
-        chart.style = 10
+        chart.gapWidth = 40
+        chart.title = _styled_title(f"{ticker} — Gap % by Event")
+        chart.style = None
+        chart.height = 9
+        chart.width = 19
+        chart.legend = None
 
         data_ref = Reference(ws, min_col=4, min_row=4, max_row=current_row - 1)
         cats_ref = Reference(ws, min_col=1, min_row=5, max_row=current_row - 1)
         chart.add_data(data_ref, titles_from_data=True)
         chart.set_categories(cats_ref)
-        chart.legend = None
+
+        # Color each bar green (gap up) or red (gap down) instead of Excel's
+        # default single flat color, so direction is visible at a glance.
+        series = chart.series[0]
+        series.graphicalProperties = GraphicalProperties(ln=LineProperties(noFill=True))
+        series.data_points = [
+            DataPoint(idx=i, spPr=GraphicalProperties(
+                solidFill=ACCENT_GREEN if val > 0 else ACCENT_RED,
+                ln=LineProperties(noFill=True),
+            ))
+            for i, val in enumerate(gappers["Gap_Pct"].tolist())
+        ]
+
+        chart.y_axis.number_format = "0.0%"
+        chart.y_axis.majorGridlines = _light_gridlines()
+        chart.y_axis.delete = False
+        _style_axis_title(chart.y_axis, "Gap %")
+        _style_axis_text(chart.y_axis, size=900)
+
+        chart.x_axis.delete = False
+        chart.x_axis.majorGridlines = None
+        chart.x_axis.tickLblPos = "low"
+        _style_axis_title(chart.x_axis, "Date")
+        _style_axis_text(chart.x_axis, size=800)
+
+        chart.graphical_properties = GraphicalProperties(ln=LineProperties(solidFill=GRID_GRAY, w=6350))
+
         ws.add_chart(chart, "J4")
 
     return wb
@@ -387,20 +459,38 @@ def build_summary_sheet(wb: openpyxl.Workbook, stats: list) -> None:
     if stats:
         chart = BarChart()
         chart.type = "col"
-        chart.title = "Avg Gap % by Ticker"
-        chart.y_axis.title = "Avg Gap %"
-        chart.y_axis.number_format = "0.0%"
-        chart.x_axis.title = "Ticker"
-        chart.height = 8
-        chart.width = 18
-        chart.style = 10
+        chart.gapWidth = 60
+        chart.title = _styled_title("Avg Gap % by Ticker")
+        chart.style = None
+        chart.height = 9
+        chart.width = 19
+        chart.legend = None
 
         last_row = 3 + len(stats)
         data_ref = Reference(ws, min_col=3, min_row=3, max_row=last_row)
         cats_ref = Reference(ws, min_col=1, min_row=4, max_row=last_row)
         chart.add_data(data_ref, titles_from_data=True)
         chart.set_categories(cats_ref)
-        chart.legend = None
+
+        series = chart.series[0]
+        series.graphicalProperties = GraphicalProperties(
+            solidFill=ACCENT_TEAL, ln=LineProperties(noFill=True)
+        )
+
+        chart.y_axis.number_format = "0.0%"
+        chart.y_axis.majorGridlines = _light_gridlines()
+        chart.y_axis.delete = False
+        _style_axis_title(chart.y_axis, "Avg Gap %")
+        _style_axis_text(chart.y_axis, size=900)
+
+        chart.x_axis.delete = False
+        chart.x_axis.majorGridlines = None
+        chart.x_axis.tickLblPos = "low"
+        _style_axis_title(chart.x_axis, "Ticker")
+        _style_axis_text(chart.x_axis, size=900, rot=0)
+
+        chart.graphical_properties = GraphicalProperties(ln=LineProperties(solidFill=GRID_GRAY, w=6350))
+
         ws.add_chart(chart, "H3")
 
 
