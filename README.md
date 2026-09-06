@@ -1,5 +1,8 @@
 # Stock Gap Analysis
 
+[![Tests](https://github.com/Vlad34745/stock-gap-analysis/actions/workflows/tests.yml/badge.svg)](https://github.com/Vlad34745/stock-gap-analysis/actions/workflows/tests.yml)
+[![codecov](https://codecov.io/gh/Vlad34745/stock-gap-analysis/graph/badge.svg)](https://codecov.io/gh/Vlad34745/stock-gap-analysis)
+
 Automated stock gap and subsequent price-action analysis tool with professional Excel reporting.
 
 ## ✨ What it does
@@ -90,4 +93,9 @@ pip install -r requirements-dev.txt
 pytest test_gappers.py -v
 ```
 
-Tests run automatically on every push via GitHub Actions (`.github/workflows/tests.yml`).
+Tests run automatically on every push via GitHub Actions (`.github/workflows/tests.yml`), including all of Python 3.11/3.12, and coverage is reported to [Codecov](https://codecov.io/gh/Vlad34745/stock-gap-analysis).
+
+To check coverage locally:
+```bash
+pytest test_gappers.py --cov=gap_analysis --cov-report=term-missing
+```

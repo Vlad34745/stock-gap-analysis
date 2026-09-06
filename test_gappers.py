@@ -193,3 +193,111 @@ def test_cache_roundtrip(tmp_path, monkeypatch, sample_data):
 def test_cache_ignored_when_missing():
     path = _cache_path("NON_EXISTENT_TICKER_XYZ", "2026-01-01", "2026-01-10")
     assert _load_from_cache(path) is None
+
+
+# --- fetch_data: network mocked out, no real HTTP calls or real sleeps ---
+
+def _fake_ohlc(n=2):
+    dates = pd.date_range("2026-01-01", periods=n, freq="D")
+    return pd.DataFrame(
+        {"Open": range(n), "High": range(n), "Low": range(n), "Close": range(n)},
+        index=dates,
+    )
+
+
+def test_fetch_data_returns_data_on_success(monkeypatch, tmp_path):
+    import gap_analysis.cache as cache_module
+    from gap_analysis import config as config_module
+    monkeypatch.setattr(config_module, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(cache_module.yf, "download", lambda *a, **k: _fake_ohlc())
+
+    result = cache_module.fetch_data("AAPL", "2026-01-01", "2026-01-02", use_cache=False)
+    assert result is not None
+    assert len(result) == 2
+
+
+def test_fetch_data_writes_cache_when_enabled(monkeypatch, tmp_path):
+    import gap_analysis.cache as cache_module
+    from gap_analysis import config as config_module
+    monkeypatch.setattr(config_module, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(cache_module.yf, "download", lambda *a, **k: _fake_ohlc())
+
+    cache_module.fetch_data("AAPL", "2026-01-01", "2026-01-02", use_cache=True)
+    assert len(list(tmp_path.glob("*.csv"))) == 1
+
+
+def test_fetch_data_retries_then_succeeds(monkeypatch, tmp_path):
+    import gap_analysis.cache as cache_module
+    from gap_analysis import config as config_module
+    monkeypatch.setattr(config_module, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(cache_module.time, "sleep", lambda *_: None)  # skip real backoff waits
+
+    calls = {"n": 0}
+
+    def flaky_download(*a, **k):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise ConnectionError("simulated network failure")
+        return _fake_ohlc()
+
+    monkeypatch.setattr(cache_module.yf, "download", flaky_download)
+    result = cache_module.fetch_data("AAPL", "2026-01-01", "2026-01-02", use_cache=False)
+    assert result is not None
+    assert calls["n"] == 2
+
+
+def test_fetch_data_gives_up_after_max_retries(monkeypatch, tmp_path):
+    import gap_analysis.cache as cache_module
+    from gap_analysis import config as config_module
+    monkeypatch.setattr(config_module, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(cache_module.time, "sleep", lambda *_: None)
+
+    def always_fails(*a, **k):
+        raise ConnectionError("simulated permanent outage")
+
+    monkeypatch.setattr(cache_module.yf, "download", always_fails)
+    result = cache_module.fetch_data("AAPL", "2026-01-01", "2026-01-02", use_cache=False)
+    assert result is None
+
+
+def test_fetch_data_returns_none_for_empty_result(monkeypatch, tmp_path):
+    import gap_analysis.cache as cache_module
+    from gap_analysis import config as config_module
+    monkeypatch.setattr(config_module, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(cache_module.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(cache_module.yf, "download", lambda *a, **k: pd.DataFrame())
+
+    result = cache_module.fetch_data("BADTICKER", "2026-01-01", "2026-01-02", use_cache=False)
+    assert result is None
+
+
+# --- parse_args: input validation, no network involved ---
+
+def test_parse_args_defaults(monkeypatch):
+    from gap_analysis.cli import parse_args
+    monkeypatch.setattr("sys.argv", ["gappers.py"])
+    args = parse_args()
+    assert args.ticker == "AAPL"
+    assert args.direction == "up"
+    assert args.threshold == 0.015
+
+
+def test_parse_args_rejects_nonpositive_threshold(monkeypatch):
+    from gap_analysis.cli import parse_args
+    monkeypatch.setattr("sys.argv", ["gappers.py", "--threshold", "0"])
+    with pytest.raises(SystemExit):
+        parse_args()
+
+
+def test_parse_args_rejects_start_after_end(monkeypatch):
+    from gap_analysis.cli import parse_args
+    monkeypatch.setattr("sys.argv", ["gappers.py", "--start", "2026-06-01", "--end", "2026-01-01"])
+    with pytest.raises(SystemExit):
+        parse_args()
+
+
+def test_parse_args_rejects_invalid_date(monkeypatch):
+    from gap_analysis.cli import parse_args
+    monkeypatch.setattr("sys.argv", ["gappers.py", "--start", "not-a-date"])
+    with pytest.raises(SystemExit):
+        parse_args()
