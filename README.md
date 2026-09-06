@@ -61,6 +61,22 @@ After each run, a quick text summary prints to the console (gap count, avg gap %
 
 Each ticker sheet includes: Date, Open Price, Prev Close, Gap %, **Filled?** (Yes/No), Day 1 Close, Day 2 Move, Day 3 Move, row-level color coding (green/red by direction), an Average row, a Fill Rate figure, and an embedded bar chart of Gap % across all detected events.
 
+## 🗂️ Project structure
+
+The implementation is split into focused modules instead of one large file:
+
+```
+gappers.py                 # entry point — `python gappers.py ...` (unchanged)
+gap_analysis/
+├── config.py               # constants, logging, theme colors
+├── cache.py                # fetch_data() — Yahoo Finance + local cache + retries
+├── analysis.py              # calculate_gaps() — core gap-detection logic
+├── chart_style.py          # shared chart styling helpers (fonts, colors, gridlines)
+├── report.py                # build_report() / build_summary_sheet() — Excel output
+└── cli.py                   # parse_args() / main() — CLI orchestration
+test_gappers.py             # pytest suite covering all of the above
+```
+
 ## 💾 Caching & retries
 
 Downloaded price data is cached locally in `.cache/` for 24 hours, so re-running
