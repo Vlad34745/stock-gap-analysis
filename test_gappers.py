@@ -174,6 +174,7 @@ def test_build_summary_sheet_is_first_and_has_correct_values(sample_data):
     assert ws.cell(row=4, column=1).value == "AAPL"
     assert ws.cell(row=4, column=2).value == 2
     assert ws.cell(row=5, column=1).value == "TSLA"
+    assert len(ws._charts) == 1
 
 
 def test_cache_roundtrip(tmp_path, monkeypatch, sample_data):

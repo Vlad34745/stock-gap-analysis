@@ -185,7 +185,9 @@ def calculate_gaps(data: pd.DataFrame, threshold: float, direction: str = "up") 
 
 def build_report(gappers: pd.DataFrame, ticker: str, wb: openpyxl.Workbook = None) -> openpyxl.Workbook:
     """
-    Build (or append to) a formatted gap-analysis report.
+    Build (or append to) a formatted gap-analysis report: a color-coded
+    table (including gap-fill detection and a Fill Rate figure) plus an
+    embedded bar chart of Gap % across all detected events.
 
     If `wb` is None, a new workbook is created and the sheet replaces the
     default blank sheet. If `wb` is given, a new sheet is appended to it —
@@ -334,7 +336,9 @@ def build_report(gappers: pd.DataFrame, ticker: str, wb: openpyxl.Workbook = Non
 def build_summary_sheet(wb: openpyxl.Workbook, stats: list) -> None:
     """
     Insert a 'Summary' sheet as the first sheet, comparing all analyzed
-    tickers side by side: gap count, average Gap %, average Day2/Day3 Move.
+    tickers side by side: gap count, average Gap %, fill rate, and
+    average Day2/Day3 follow-through — plus a bar chart comparing
+    average Gap % across tickers.
     `stats` is a list of dicts, one per ticker.
     """
     ws = wb.create_sheet("Summary", 0)
@@ -379,6 +383,25 @@ def build_summary_sheet(wb: openpyxl.Workbook, stats: list) -> None:
         max_len = max(len(str(cell.value or "")) for cell in col)
         col_letter = get_column_letter(col[0].column)
         ws.column_dimensions[col_letter].width = max(max_len + 3, 15)
+
+    if stats:
+        chart = BarChart()
+        chart.type = "col"
+        chart.title = "Avg Gap % by Ticker"
+        chart.y_axis.title = "Avg Gap %"
+        chart.y_axis.number_format = "0.0%"
+        chart.x_axis.title = "Ticker"
+        chart.height = 8
+        chart.width = 18
+        chart.style = 10
+
+        last_row = 3 + len(stats)
+        data_ref = Reference(ws, min_col=3, min_row=3, max_row=last_row)
+        cats_ref = Reference(ws, min_col=1, min_row=4, max_row=last_row)
+        chart.add_data(data_ref, titles_from_data=True)
+        chart.set_categories(cats_ref)
+        chart.legend = None
+        ws.add_chart(chart, "H3")
 
 
 def main() -> None:
